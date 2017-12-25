@@ -1,0 +1,1130 @@
+\documentclass[onecolumn]{article}
+
+% Packages
+\usepackage{graphicx}
+\usepackage{color}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage[backend=bibtex,style=numeric,sorting=none]{biblatex}
+\usepackage{url}
+\usepackage{hyperref}
+\usepackage{float}
+\usepackage[margin=1in]{geometry}
+
+\addbibresource{project.bib}  
+
+\usepackage{array, booktabs}
+\usepackage[x11names]{xcolor}
+\usepackage{colortbl}
+\usepackage{caption}
+\newcommand{\foo}{\color{LightSteelBlue3}\makebox[0pt]{\textbullet}\hskip-0.5pt\vrule width 1pt\hspace{\labelsep}}
+\DeclareCaptionFont{blue}{\color{LightSteelBlue3}}
+
+% Title
+\title{Longitudinal Analysis of TV Series Data}
+\author{Siyue Gao, Yuyan Liu \& Miten Shah \\
+Department of Statistics, Rice University, Houston TX}
+\date{}
+\begin{document}
+
+\maketitle
+
+<<libraries, message=FALSE, echo=FALSE, warning=FALSE>>=
+
+library(printr)
+library(tidyverse)
+library(RPostgreSQL)
+library(xtable)
+library(grid)
+library(gridBase)
+library(gridExtra)
+library(tm)
+library(wordcloud)
+library(stringr)
+
+drv <- dbDriver("PostgreSQL")
+con <- dbConnect(drv = drv, 
+                 host = "localhost",
+                 dbname = "postgres",
+                 user = "postgres", 
+                 password = "mitenshah",
+                 port = 5432)
+
+@
+
+<<message=FALSE, echo=FALSE, warning=FALSE>>=
+
+broadcast.networks <- c("NBC" = "'NBC'", "CBS" = "'CBS'", "ABC" = "'ABC (US)'")
+cable.networks <- c("AMC" = "'AMC'", "Comedy Central" = "'Comedy Central (US)'", "HBO" = "'HBO'")
+streaming.networks <- c("Amazon Video" = "'Amazon'", "Netflix" = "'Netflix'", "Hulu" = "'Hulu'")
+
+all.networks <- c(broadcast.networks, cable.networks, streaming.networks)
+
+@
+
+<<awards, message=FALSE, echo=FALSE, warning=FALSE>>=
+
+emmy.winners <- read.csv("data/Emmy Winners.csv", stringsAsFactors = FALSE)[,-9]
+emmy.winners[, 2:4] <- apply(emmy.winners[, 2:4], 2, function(x) str_replace(x, "\n\n", ": "))
+emmy.winners[, 5:8] <- apply(emmy.winners[, 5:8], 2, function(x) str_replace(x, "\n\n", " - "))
+emmy.winners[, 5:8] <- apply(emmy.winners[, 5:8], 2, function(x) str_replace(x, "\n\n", ": "))
+
+emmy.networks <- as.data.frame(apply(emmy.winners[, 2:8], 2, function(x) str_match(x, ":.*\\(([\\w /]+)\\)$")[, 2]))
+
+emmy.networks.old <- emmy.networks %>%
+	mutate(year = emmy.winners[, 1]) %>%
+	filter(year < 2007) %>%
+	select(-year)
+
+emmy.networks.old <- as.data.frame(table(unlist(emmy.networks.old))) %>%
+	filter(Freq > 0, Var1 != "Outstanding Program Achievements in Entertainment")
+
+emmy.networks.latest <- emmy.networks %>%
+	mutate(year = emmy.winners[, 1]) %>%
+	filter(year >= 2007) %>%
+	select(-year)
+
+emmy.networks.latest <- as.data.frame(table(unlist(emmy.networks.latest))) %>%
+	filter(Freq > 0)
+
+@
+
+\section{Introduction}
+
+TV Series (a.k.a. TV Shows) are a widely known and consumed form of entertainment. We wish to analyse the constantly changing aspects of TV Series over time, be it genre, recurring themes, or impact of streaming-networks.
+
+A TV series is basically divided in to multiple seasons and each season consists of a finite number of episodes. In general, there is a new season each year. A TV series consists of a lead cast, supporting cast members and recurring cast members. The TV series usually airs on a weekly basis on a particular network (such as NBC, Netflix and BBC) on a particular timeslot. The genre of the TV series can span from drama, mystery and thriller to light-hearted comedies.
+
+We have a huge dataset with TV series data ranging from early 1900s to the one aired last week. We wish to hence, analyse the data longitudinally, i.e., through the years. There are many questions at hand that we think we can answer with this project using R\cite{r}. 
+
+We have divided this report into two main sections: 
+\begin{itemize}
+\item Over the Years: This section will be a broad comparison of TV series in general and how they have developed across the years.
+\item TV Networks in the Past Decade: This section will compare the prominent TV Networks based on their type.
+\end{itemize}
+
+\section{The Data}
+
+The source for our database has been \url{TheTVDB.com}\cite{tvdb}. We used the JSON API to download the datasets and stored them as csv files on the local drive. The data was cleaned to remove any NULL/(empty) placeholder strings from the files and to remove unidentified unicode segments using RegEx. We then imported them into PostgreSQL\cite{postgresql}. For Emmy data, we scraped the data from Wikipedia and did some cleaning in R using RegEx to be able to easily extract actor/network/series from the data.
+
+\subsection{The Series}
+
+<<message=FALSE, echo=FALSE, warning=FALSE>>=
+
+query <- paste("SELECT COUNT(id) AS series_count" ,
+               "FROM Series")
+
+output <- dbGetQuery(con, query)
+
+@
+
+We have $\Sexpr{as.integer(output$series_count)}$ TV series data.
+
+\begin{table}[H]
+\begin{tabular}{|p{4cm}|p{10cm}|}
+
+  \hline
+  \textbf{Variable} & \textbf{Definition} \\ \hline
+  seriesName & Name of the series \\ \hline
+  status & Whether the series is running or ended \\ \hline
+  firstAired & Date of first airing \\ \hline
+  network & On which network is / was the series running \\ \hline
+  runtime & Approximate Length in minutes of each episode of the series \\ \hline
+  genre & Genre which the series deals with \\ \hline
+  overview & A brief summary of the series \\ \hline
+  airDayOfWeek & Day of the week on which the series airs. \\ \hline
+  airsTime & Time of the day on which the series airs. \\ \hline
+  rating & Viewers advisory rating \\ \hline
+  siteRating & Average user rating of the series on TVDB \\ \hline
+  siteRatingCount & Count of users who rated the series on TVDB \\ \hline
+  
+\end{tabular}
+\end{table}
+
+\subsection{The Episodes}
+
+<<message=FALSE, echo=FALSE, warning=FALSE>>=
+
+query <- paste("SELECT COUNT(id) AS episodes_count" ,
+               "FROM Episodes")
+
+output <- dbGetQuery(con, query)
+
+@
+
+We have $\Sexpr{as.integer(output$episodes_count)}$ episodes data.
+
+\begin{table}[H]
+\begin{tabular}{|p{4cm}|p{10cm}|}
+
+  \hline
+  \textbf{Variable} & \textbf{Definition} \\ \hline
+  seriesID & ID of the series of which the episode was part of \\ \hline
+  airedEpisodeNumber & The $n^{th}$ episode of the season \\ \hline
+  airedSeason & The season number in which the episode takes place \\ \hline
+  episodeName & Name of the episode \\ \hline
+  firstAired & Date on which the episode was first aired \\ \hline
+  overview & A brief summary of the episode \\ \hline
+  
+\end{tabular}
+\end{table}
+
+\subsection{The Actors}
+
+<<message=FALSE, echo=FALSE, warning=FALSE>>=
+
+query <- paste("SELECT COUNT(id) AS actors_count" ,
+               "FROM Actor")
+
+output <- dbGetQuery(con, query)
+
+@
+
+We have $\Sexpr{as.integer(output$actors_count)}$ actors data.
+
+\begin{table}[H]
+\begin{tabular}{|p{4cm}|p{10cm}|}
+
+  \hline
+  \textbf{Variable} & \textbf{Definition} \\ \hline
+  seriesID & ID of the series of which the actor was part of \\ \hline
+  name & Name of the actor \\ \hline
+  role & Name of the role played by the actor in the series \\ \hline
+  sortOrder & The importance of the actor on the show ($0$ = lead role, $1$ = main cast, $2$ = recurring character $\ldots$) \\ \hline
+  
+\end{tabular}
+\end{table}
+
+\subsection{The Emmys}
+
+We have Primetime Emmy Awards data\cite{emmys} spanning from 1949 to 2017.
+It consists of the following categories:
+\begin{itemize}
+\item Programs
+\begin{enumerate}
+\item Outstanding Comedy Series
+\item Outstanding Drama Series
+\item Outstanding Variety Series
+\end{enumerate}
+\item Acting
+\begin{enumerate}
+\item Outstanding Lead Actor in a Comedy Series
+\item Outstanding Lead Actor in a Drama Series
+\item Outstanding Lead Actress in a Comedy Series
+\item Outstanding Lead Actress in a Drama Series
+\end{enumerate}
+\end{itemize}
+
+\section{Over the Years}
+
+\subsection{Contemporary Themes}
+
+\subsubsection{From TV Series Overviews}
+
+\begin{figure}[H]
+    \centering
+
+<<yearthemes1, message=FALSE, echo=FALSE, warning=FALSE>>=
+
+getTermMatrix <- function(year) {
+	query <- paste("SELECT STRING_AGG(overview, ' ') AS text",
+				   "FROM Series",
+				   "WHERE EXTRACT(YEAR FROM firstAired) BETWEEN ", paste0(year, collapse = " AND "))
+				   # "AND network in (", paste0(all.networks, collapse = ", ") ,");")
+	
+	output <- dbGetQuery(con, query)
+	text <- output$text
+	myCorpus = Corpus(VectorSource(text))
+	myCorpus = tm_map(myCorpus, content_transformer(tolower))
+	myCorpus = tm_map(myCorpus, removePunctuation)
+	myCorpus = tm_map(myCorpus, removeNumbers)
+	myCorpus = tm_map(myCorpus, removeWords,
+					  c(stopwords("SMART"), "the", "and", "but", "series", "show", "episode", "television", "miniseries", "episodes", "nbc", "cbs", "abc", "bbc", "season", "aired", "shows", "film", "story", "based", "stories"))
+	
+	myDTM = TermDocumentMatrix(myCorpus, control = list(minWordLength = 1))
+	m = as.matrix(myDTM)
+	sort(rowSums(m), decreasing = TRUE)
+}
+
+theme.1960 <- getTermMatrix(c(1951, 1960))
+theme.1970 <- getTermMatrix(c(1961, 1970))
+theme.1980 <- getTermMatrix(c(1971, 1980))
+theme.1990 <- getTermMatrix(c(1981, 1990))
+theme.2000 <- getTermMatrix(c(1991, 2000))
+theme.2010 <- getTermMatrix(c(2001, 2010))
+
+grid.newpage()
+plot.new()
+
+opar <- par(no.readonly=TRUE)
+
+pushViewport(viewport(x = 1/6, y = .95, width = 1/3, height = .1))
+grid.rect(gp = gpar(col = "black"))
+grid.text(expression(bold("1951-1960")), x = .5, y = .5)
+popViewport()
+pushViewport(viewport(x = .5, y = .95, width = 1/3, height = .1))
+grid.rect(gp = gpar(col = "black"))
+grid.text(expression(bold("1961-1970")), x = .5, y = .5)
+popViewport()
+pushViewport(viewport(x = 5/6, y = .95, width = 1/3, height = .1))
+grid.rect(gp = gpar(col = "black"))
+grid.text(expression(bold("1971-1980")), x = .5, y = .5)
+popViewport()
+pushViewport(viewport(x = 1/6, y = .7, width = 1/3, height = .4))
+grid.rect(gp = gpar(col = "black"))
+par(new=TRUE)
+par(fig=gridFIG())
+wordcloud(names(theme.1960), theme.1960, 
+		  max.words = 50, colors=brewer.pal(8, "Dark2"), random.order = FALSE)
+popViewport()
+pushViewport(viewport(x = .5, y = .7, width = 1/3, height = .4))
+grid.rect(gp = gpar(col = "black"))
+par(new=TRUE)
+par(fig=gridFIG())
+wordcloud(names(theme.1970), theme.1970, 
+		  max.words = 50, colors=brewer.pal(8, "Dark2"), random.order = FALSE)
+popViewport()
+pushViewport(viewport(x = 5/6, y = .7, width = 1/3, height = .4))
+grid.rect(gp = gpar(col = "black"))
+par(new=TRUE)
+par(fig=gridFIG())
+wordcloud(names(theme.1980), theme.1980, 
+		  max.words = 50, colors=brewer.pal(8, "Dark2"), random.order = FALSE)
+popViewport()
+pushViewport(viewport(x = 1/6, y = .45, width = 1/3, height = .1))
+grid.rect(gp = gpar(col = "black"))
+grid.text(expression(bold("1981-1990")), x = .5, y = .5)
+popViewport()
+pushViewport(viewport(x = .5, y = .45, width = 1/3, height = .1))
+grid.rect(gp = gpar(col = "black"))
+grid.text(expression(bold("2001-2000")), x = .5, y = .5)
+popViewport()
+pushViewport(viewport(x = 5/6, y = .45, width = 1/3, height = .1))
+grid.rect(gp = gpar(col = "black"))
+grid.text(expression(bold("2000-2010")), x = .5, y = .5)
+popViewport()
+pushViewport(viewport(x = 1/6, y = .2, width = 1/3, height = .4))
+grid.rect(gp = gpar(col = "black"))
+par(new=TRUE)
+par(fig=gridFIG())
+wordcloud(names(theme.1990), theme.1990, 
+		  max.words = 50, colors=brewer.pal(8, "Dark2"), random.order = FALSE)
+popViewport()
+pushViewport(viewport(x = .5, y = .2, width = 1/3, height = .4))
+grid.rect(gp = gpar(col = "black"))
+par(new=TRUE)
+par(fig=gridFIG())
+wordcloud(names(theme.2000), theme.2000, 
+		  max.words = 50, colors=brewer.pal(8, "Dark2"), random.order = FALSE)
+popViewport()
+pushViewport(viewport(x = 5/6, y = .2, width = 1/3, height = .4))
+grid.rect(gp = gpar(col = "black"))
+par(new=TRUE)
+par(fig=gridFIG())
+wordcloud(names(theme.2010), theme.2010, 
+		  max.words = 50, colors=brewer.pal(8, "Dark2"), random.order = FALSE)
+popViewport()
+
+par(opar)
+
+@
+
+    \caption{Prominent Themes Across the Years}
+    \label{fig:yearthemes}
+\end{figure}
+
+From Fig. \ref{fig:yearthemes}, "War" and "Life are the common theme across all the decades. "World" and "Family" are also quite prominent since the 60s.
+
+\subsubsection{From TV Episodes Overviews}
+
+<<yearthemes2, message=FALSE, echo=FALSE, warning=FALSE, results='asis'>>=
+
+getTermMatrix <- function(year) {
+	query <- paste("SELECT STRING_AGG(e.overview, ' ') AS text",
+				   "FROM Series S INNER JOIN Episodes E ON S.id = E.seriesid",
+				   "WHERE (siterating >= 5 AND siteratingcount >= 25)",
+				   "AND EXTRACT(YEAR FROM S.firstAired) BETWEEN ", paste0(year, collapse = " AND "),
+				   "AND network IN (", paste0(all.networks, collapse = ", ") ,");")
+				   
+	output <- dbGetQuery(con, query)
+	text <- output$text
+	myCorpus <- Corpus(VectorSource(text))
+	myCorpus <- tm_map(myCorpus, content_transformer(tolower))
+	myCorpus <- tm_map(myCorpus, removePunctuation)
+	myCorpus <- tm_map(myCorpus, removeNumbers)
+	myCorpus <- tm_map(myCorpus, removeWords,
+					   c(stopwords("SMART"), "the", "and", "but", "series", "show", "episode", "television", "miniseries", "episodes"))
+	
+	myDTM <- TermDocumentMatrix(myCorpus, control = list(minWordLength = 1))
+	m <- as.matrix(myDTM)
+	sort(rowSums(m), decreasing = TRUE)[1:20]
+}
+
+theme.1960 <- getTermMatrix(c(1951, 1960))
+theme.1970 <- getTermMatrix(c(1961, 1970))
+theme.1980 <- getTermMatrix(c(1971, 1980))
+theme.1990 <- getTermMatrix(c(1981, 1990))
+theme.2000 <- getTermMatrix(c(1991, 2000))
+theme.2010 <- getTermMatrix(c(2001, 2010))
+
+.simpleCap <- function(x) {
+    s <- strsplit(x, " ")[[1]]
+    paste(toupper(substring(s, 1, 1)), substring(s, 2),
+          sep = "", collapse = " ")
+}
+
+@
+
+\begin{table}[H]
+\renewcommand\arraystretch{2}\arrayrulecolor{LightSteelBlue3}
+\captionsetup{singlelinecheck=true, font=blue, labelfont=sc, labelsep=quad}
+\caption{Top Words Occurring in Episodes Overviews}\vskip -1.5ex
+\label{tab:epthemes}
+\begin{tabular}{@{\,}r <{\hskip 2pt} !{\foo} >{\raggedright\arraybackslash}p{15cm}}
+\toprule
+\addlinespace[1.5ex]
+1951-1960 & \Sexpr{.simpleCap(paste(names(theme.1960), collapse = " - "))} \\
+1961-1970 & \Sexpr{.simpleCap(paste(names(theme.1970), collapse = " - "))} \\
+1971-1980 & \Sexpr{.simpleCap(paste(names(theme.1980), collapse = " - "))} \\
+1981-1990 & \Sexpr{.simpleCap(paste(names(theme.1990), collapse = " - "))} \\
+1991-2000 & \Sexpr{.simpleCap(paste(names(theme.2000), collapse = " - "))} \\
+2001-2010 & \Sexpr{.simpleCap(paste(names(theme.2010), collapse = " - "))}
+\end{tabular}
+\end{table}
+
+We narrowed down the episodes data to remove shows with rating less than 5 and rating count less than 25. From Table \ref{tab:epthemes}, we can see the following:
+\begin{itemize}
+\item In the 50s, the most common words come from the characters and themes in "The Flintstones" and "The Twilight Zone".
+\item In the 60s, the most common words come from the characters and themes in "Batman" and "Star Trek".
+\item In the 70s, the most common words suggest inception of "Saturday Night Live" from words like "sketches", "York", "perform", "Higgins", "weekend".
+\item In the 80s, the most common words come from the characters and themes in "Seinfeld".
+\item Since the 90s, the common words do not suggest any particular TV shows.
+\end{itemize}
+
+\subsection{Genres}
+
+<<genres, message=FALSE, echo=FALSE, warning=FALSE, results='asis'>>=
+
+## How has the genre developed over time
+
+query <- paste("SELECT C.interval, C.genre, Row_Id",
+			   "FROM",
+			   "(SELECT B.interval, B.genre, B.series_per_genre_count, ROW_NUMBER() OVER (PARTITION BY B.interval ORDER BY series_per_genre_count DESC) AS Row_Id",
+			   "FROM",
+			   "(SELECT A.genre, (CAST(A.year AS varchar) || '-' || LPAD(CAST(MOD(CAST(A.year + 10 AS integer), 100) AS varchar), 2, '0')) AS interval, COUNT(A.id) AS series_per_genre_count",
+			   "FROM",
+			   "(SELECT  id, FLOOR(EXTRACT(YEAR FROM firstAired) / 10) * 10 AS year, REGEXP_SPLIT_TO_TABLE(genre, ', ') AS genre",
+			   "FROM Series",
+			   "WHERE firstAired BETWEEN '1950-01-01' AND '2017-12-31') A",
+			   "GROUP BY A.year, A.genre) B) C",
+			   "WHERE Row_Id <= 10")
+
+output <- dbGetQuery(con, query)
+
+output <- output %>% 
+	mutate(row_id = as.integer(row_id)) %>%
+	rename(Decade = interval, Rank = row_id) %>%
+	arrange(desc(Decade)) %>%
+	spread(Decade, genre)
+
+print(xtable(output, label = "tab:topgenre", caption = c(NULL, "Top genres over the decades")), scalebox = 0.9, include.rownames = FALSE, size = "small", table.placement = "H")
+
+@
+
+Table \ref{tab:topgenre} suggests Drama and Comedy have stood the strongest across time along with Animation \& Childrens' TV series. We can observe the peak of the Western genre in the 1950s. Documentary and Reality TV series have risen to the top in the new millennium. Surprisingly, not many Romance TV series were produced until the current decade.
+
+\subsection{Actors}
+
+\subsubsection{Prolific Actors}
+    
+<<actors1, message=FALSE, echo=FALSE, warning=FALSE, results='asis'>>=
+
+## Industrious actors
+
+query <- paste("SELECT name, ",
+			   "COUNT(S.id) AS series_per_actor",
+			   "FROM Series S INNER JOIN Actor A ON S.id = A.seriesid",
+			   "GROUP BY name",
+			   "ORDER BY series_per_actor DESC",
+			   "LIMIT 10")
+
+output <- dbGetQuery(conn = con, query)
+
+output <- output %>% 
+	mutate(series_per_actor = as.integer(series_per_actor))
+
+colnames(output) <- c("Actor", "Number of series")
+
+print(xtable(output, label = "tab:prolific", caption = c(NULL, "Industrious Actors")), include.rownames = FALSE, table.placement = "H")
+
+@
+
+Table \ref{tab:prolific} shows that most prolific actors are technically voice-actors either from America or Japan.
+
+\subsubsection{Actors working in Highly-Rated Series}
+
+<<actors2, message=FALSE, echo=FALSE, warning=FALSE, results='asis'>>=
+
+## High-rated Actors
+
+query <- paste("SELECT name, ",
+			   "COUNT(S.id) AS series_per_actor, AVG(S.siteRating) as actor_rating_average",
+			   "FROM Series S INNER JOIN Actor A ON S.id = A.seriesid",
+			   "GROUP BY name",
+			   "HAVING COUNT(S.id) > 5 AND COUNT(S.siteRatingCount) > 10",
+			   "ORDER BY actor_rating_average DESC",
+			   "LIMIT 10")
+
+output <- dbGetQuery(conn = con, query)
+
+output <- output %>% 
+	mutate(series_per_actor = as.integer(series_per_actor), 
+		   actor_rating_average = round(actor_rating_average, 2)) %>%
+	head(5)
+
+colnames(output) <- c("Actor", "Number of series", "Average Rating")
+
+print(xtable(output, label = "tab:rated", caption = c(NULL, "Actors working in highly-rated shows ()")), include.rownames = FALSE, table.placement = "H")
+
+@
+
+For Table \ref{tab:rated}, we only look at actors here have worked in at least 5 TV series and the average siteRatingcount is at least greater than 10. We again observe dominance of Japanese voice-actors.
+
+\subsubsection{Diverse Actors}
+
+<<actors3, message=FALSE, echo=FALSE, warning=FALSE, results='asis'>>=
+
+## Diverse actors
+
+query <- paste("SELECT C.name, COUNT(DISTINCT(genre)) AS diversity",
+			   "FROM",
+			   "(SELECT A.name, A.seriesid, B.genre",
+			   "FROM Actor A, ",
+			   "(SELECT id, REGEXP_SPLIT_TO_TABLE(genre, ', ') AS genre FROM Series) B",
+			   "WHERE A.seriesid = B.id) C",
+			   "GROUP BY C.name",
+			   "ORDER BY COUNT(DISTINCT(genre)) DESC",
+			   "LIMIT 10;")
+
+output <- dbGetQuery(conn = con, query)
+
+output <- output %>% 
+	mutate(diversity = as.integer(diversity)) %>%
+	head(3)
+
+colnames(output) <- c("Actor", "Diversity")
+
+print(xtable(output, label = "tab:diverse", caption = c(NULL, "Most diverse actors")), include.rownames = FALSE, table.placement = "H")
+
+@
+
+For Table \ref{tab:diverse} we observe that David Tennant, of "Doctor Who" and "Broadchurch" fame, is the among the most diverse actors along with two other Japanese voice actors, with 17 different genres. 
+
+\subsection{Awards}
+
+\subsubsection{Primetime Emmy for Lead Actors}
+
+<<awards1, message=FALSE, echo=FALSE, warning=FALSE, results='asis'>>=
+
+emmy.actors <- as.data.frame(apply(emmy.winners[, 5:8], 2, 
+								  function(x) str_match(x, "^([^']+) - .*")[, 2]), stringsAsFactors = FALSE)
+emmy.actors <- c(emmy.actors[, 1], emmy.actors[, 2], emmy.actors[, 3], emmy.actors[, 4])
+
+emmy.actors.tbl <- as.data.frame(table(emmy.actors))
+colnames(emmy.actors.tbl) <- c("name", "Emmys")
+
+emmy.actors <- unique(paste0("'", emmy.actors, "'"))
+
+query <- paste("SELECT name, ",
+			   "COUNT(S.id) AS series_per_actor, AVG(S.siteRating) as actor_rating_average, AVG(S.siteRatingCount) as actor_ratingcount_average",
+			   "FROM Series S INNER JOIN Actor A ON S.id = A.seriesid",
+			   "WHERE name IN (", paste0(emmy.actors, collapse = ", ") ,")",
+			   "GROUP BY name")
+
+output <- dbGetQuery(conn = con, query)
+
+emmy.wins <- merge(output, emmy.actors.tbl, by = "name")
+
+emmy.wins <- emmy.wins %>%
+	mutate(series_per_actor = as.integer(series_per_actor)) %>%
+	arrange(desc(Emmys)) %>%
+	head(5)
+
+colnames(emmy.wins) <- c("Actor", "Number of Series", "Average Series Rating", "Average Series Rating Count", "Emmys")
+
+print(xtable(emmy.wins, label = "tab:actoremmy", caption = c(NULL, "Actors with most lead Primetime Emmy Awards")), include.rownames = FALSE, table.placement = "H")
+
+@
+
+Table \ref{tab:actoremmy} shows the actors with most number of Lead Emmys along with the number of shows they have done, average rating of those TV shows and the average rating count for each show. Notice all are females.
+
+\subsubsection{Primetime Emmy for TV Series}
+
+<<awards2, message=FALSE, echo=FALSE, warning=FALSE, results='asis'>>=
+
+emmy.shows1 <- as.data.frame(apply(emmy.winners[, 2:4], 2, 
+								  function(x) str_match(x, "^([^']+[.]*):")[, 2]), stringsAsFactors = FALSE)
+emmy.shows2 <- as.data.frame(apply(emmy.winners[, 5:8], 2, 
+								  function(x) str_match(x, "^.+ - ([^(')]+):")[, 2]), stringsAsFactors = FALSE)
+
+emmy.shows <- c(emmy.shows1[, 1], emmy.shows1[, 2], emmy.shows1[, 3])
+
+emmy.shows.tbl <- as.data.frame(table(emmy.shows))
+colnames(emmy.shows.tbl) <- c("seriesname", "Emmys")
+
+emmy.shows <- unique(paste0("'", emmy.shows, "'"))
+
+query <- paste("SELECT seriesName, siteRating, siteRatingCount",
+			   "FROM Series",
+			   "WHERE seriesname IN (", paste0(emmy.shows, collapse = ", ") ,");")
+output <- dbGetQuery(con, query)
+
+emmy.wins <- merge(output, emmy.shows.tbl, by = "seriesname")
+
+emmy.wins <- emmy.wins %>%
+	arrange(desc(Emmys)) %>%
+	head(5)
+
+colnames(emmy.wins) <- c("Series", "Series Rating", "Series Rating Count", "Emmys")
+
+print(xtable(emmy.wins, label = "tab:seriesemmy", caption = c(NULL, "Shows with most Primetime Emmy Awards")), include.rownames = FALSE, table.placement = "H")
+
+@
+
+Table \ref{tab:seriesemmy} shows the series with most number of Lead Emmys along with their average rating and the average rating count. Most of them are family-based comedies.
+
+\section{TV Networks in the Past Decade}
+
+We are looking specifically into the US TV Networks in the last decade (2007-2017) for the fact that Streaming Networks only arrived to the scene in this time and Cable Networks have created some of the top shows to compete to the ever-present Broadcast Networks. We are particularly looking into the following network representation based on popularity, Nielsen ratings and their propensity of winning Emmys:
+
+\begin{itemize}
+\item Broadcast Networks
+\begin{enumerate}
+\item ABC
+\item CBS
+\item NBC
+\end{enumerate}
+\item Cable Networks
+\begin{enumerate}
+\item AMC
+\item Comedy Central
+\item HBO
+\end{enumerate}
+\item Streaming Networks
+\begin{enumerate}
+\item Amazon
+\item Hulu
+\item Netflix
+\end{enumerate}
+\end{itemize}
+
+\subsection{Production}
+
+\begin{figure}[H]
+    \centering
+    
+<<production, message=FALSE, echo=FALSE, warning=FALSE>>=
+
+query <- paste("SELECT EXTRACT(YEAR FROM firstAired) AS year,", 
+                "COUNT(id) AS series_count",
+                "FROM Series",
+                "WHERE (firstAired BETWEEN '1960-01-01' AND '2017-12-31')",
+                "GROUP BY year",
+                "ORDER BY year")
+
+overall.data <- dbGetQuery(con, query)
+
+p <- ggplot(overall.data) +
+	aes(x = year, y = series_count) +
+	geom_line() +
+	geom_point() +
+	geom_smooth(method = "loess", se = FALSE) +
+	labs(y = "Total series") +
+	scale_x_continuous(breaks = seq(1960, 2010, 10)) +
+	theme(axis.title.x = element_blank())
+
+query <- paste("SELECT EXTRACT(YEAR FROM firstAired) AS year,", 
+               "COUNT(id) AS series_count, AVG(siteRating) AS rating_average,",
+			   "AVG(siteratingcount) AS network_rating_count_average",
+               "FROM Series",
+               "WHERE firstAired BETWEEN '1940-01-01' AND '2017-12-31'",
+               "AND network in (", paste0(broadcast.networks, collapse = ", ") ,")",
+               "GROUP BY year")
+
+broadcast.data <- dbGetQuery(con, query)
+broadcast.data <- broadcast.data %>% 
+	mutate(type = "Broadcast")
+
+
+query <- paste("SELECT EXTRACT(YEAR FROM firstAired) AS year,", 
+               "COUNT(id) AS series_count, AVG(siteRating) AS rating_average,",
+			   "AVG(siteratingcount) AS network_rating_count_average",
+               "FROM Series",
+               "WHERE firstAired BETWEEN '1940-01-01' AND '2017-12-31'",
+               "AND network in (", paste0(cable.networks, collapse = ", ") ,")",
+               "GROUP BY year")
+
+cable.data <- dbGetQuery(con, query) 
+cable.data <- cable.data %>% 
+	mutate(type = "Cable")
+
+query <- paste("SELECT EXTRACT(YEAR FROM firstAired) AS year,", 
+               "COUNT(id) AS series_count, AVG(siteRating) AS rating_average,",
+			   "AVG(siteratingcount) AS network_rating_count_average",
+               "FROM Series",
+               "WHERE firstAired BETWEEN '1940-01-01' AND '2017-12-31'",
+               "AND network in (", paste0(streaming.networks, collapse = ", ") ,")",
+               "GROUP BY year")
+
+streaming.data <- dbGetQuery(con, query)
+streaming.data <- streaming.data %>% 
+	filter(series_count > 0 & rating_average > 0) %>%
+	mutate(type = "Streaming")
+
+combined.data <- bind_rows(broadcast.data, cable.data, streaming.data)
+
+p1 <- ggplot(data = combined.data) +
+	aes(x = year, y = series_count, colour = type) +
+	geom_line() +
+	geom_point() +
+	geom_smooth(method = "loess", se = FALSE) + 
+	facet_grid(. ~ type) +
+	labs(y = "Total Series") +
+	scale_color_discrete(guide = FALSE) +
+	scale_x_continuous(limits = c(2007, 2017), breaks = c(2010, 2015)) +
+	theme(axis.title.x = element_blank())
+	
+p2 <- ggplot(data = combined.data) +
+	aes(x = year, y = rating_average, colour = type) +
+	geom_line() +
+	geom_point() +
+	geom_smooth(method = "loess", se = FALSE) + 
+	facet_grid(. ~ type, switch = "x") +
+	labs(y = "Average Rating") +
+	scale_color_discrete(guide = FALSE) +
+	scale_x_continuous(limits = c(2007, 2017), breaks = c(2010, 2015), position = "top") +
+	scale_y_continuous(breaks = c(5, 10)) +
+	theme(axis.title.x = element_blank())
+
+grid.newpage()
+pushViewport(viewport(y = 2/3, height = 1/3, just = "bottom"))
+print(p, newpage = FALSE)
+grid.rect(0.8, 0.55, width = 0.35, height = 0.7, gp = gpar(fill = NA, col = "red", lwd = 2))
+popViewport()
+pushViewport(viewport(y = 1/3, height = 1/3, just = "bottom"))
+print(p1, newpage = FALSE)
+popViewport()
+pushViewport(viewport(y = 0, height = 1/3, just = "bottom"))
+print(p2, newpage = FALSE)
+popViewport()
+
+@
+
+    \caption{TV Networks (Production)}
+    \label{fig:production}
+\end{figure}
+
+We can see in Fig. \ref{fig:production} (top), the highlighted region is many times referred to as the New Golden Age of Television\cite{golden}. From Fig. \ref{fig:production} (bottom-right) point out that their is a streaming boom in the last decade. More shows seem to be produced by the major streaming networks compared to their conventional counterparts. The conventional networks have been producing new shows on an almost constant levels. From Fig. \ref{fig:production} (bottom-left) we can establish that the streaming networks may have started out with high ratings but are converging to the similar ratings as the conventional networks.
+
+\subsection{Themes}
+
+\begin{figure}[H]
+    \centering
+
+<<seriesthemes, message=FALSE, echo=FALSE, warning=FALSE>>=
+
+getTermMatrix <- function(year, network) {
+	query <- paste("SELECT STRING_AGG(overview, ' ') AS text",
+				   "FROM Series",
+				   "WHERE EXTRACT(YEAR FROM firstAired) BETWEEN ", paste0(year, collapse = " AND "),
+				   "AND network in (", paste0(network, collapse = ", ") ,");")
+	
+	output <- dbGetQuery(con, query)
+	text <- output$text
+	myCorpus = Corpus(VectorSource(text))
+	myCorpus = tm_map(myCorpus, content_transformer(tolower))
+	myCorpus = tm_map(myCorpus, removePunctuation)
+	myCorpus = tm_map(myCorpus, removeNumbers)
+	myCorpus = tm_map(myCorpus, removeWords,
+					  c(stopwords("SMART"), "the", "and", "but", "series", "show", "episode", "television", "miniseries", "episodes", "nbc", "cbs", "abc", "hbo", "season", "aired"))
+	
+	myDTM = TermDocumentMatrix(myCorpus, control = list(minWordLength = 1))
+	m = as.matrix(myDTM)
+	sort(rowSums(m), decreasing = TRUE)
+}
+
+broadcast.theme.before <- getTermMatrix(c(2008, 2012), broadcast.networks)
+
+broadcast.theme.after <- getTermMatrix(c(2013, 2017), broadcast.networks)
+
+cable.theme.before <- getTermMatrix(c(2008, 2012), cable.networks)
+
+cable.theme.after <- getTermMatrix(c(2013, 2017), cable.networks)
+
+streaming.theme.before <- getTermMatrix(c(2008, 2012), streaming.networks)
+
+streaming.theme.after <- getTermMatrix(c(2013, 2017), streaming.networks)
+
+grid.newpage()
+plot.new()
+
+opar <- par(no.readonly=TRUE)
+
+pushViewport(viewport(x = .05, y = .95, width = .1, height = .1))
+grid.rect(gp = gpar(col = "black"))
+popViewport()
+pushViewport(viewport(x = .25, y = .95, width = .3, height = .1))
+grid.rect(gp = gpar(col = "black"))
+grid.text(expression(bold("Broadcast")), x = .5, y = .5)
+popViewport()
+pushViewport(viewport(x = .55, y = .95, width = .3, height = .1))
+grid.rect(gp = gpar(col = "black"))
+grid.text(expression(bold("Cable")), x = .5, y = .5)
+popViewport()
+pushViewport(viewport(x = .85, y = .95, width = .3, height = .1))
+grid.rect(gp = gpar(col = "black"))
+grid.text(expression(bold("Streaming")), x = .5, y = .5)
+popViewport()
+pushViewport(viewport(x = .05, y = .675, width = .1, height = .45))
+grid.rect(gp = gpar(col = "black"))
+grid.text(expression(bold("2008-2012")), x = .5, y = .5, rot = 90)
+popViewport()
+pushViewport(viewport(x = .05, y = .225, width = .1, height = .45))
+grid.rect(gp = gpar(col = "black"))
+grid.text(expression(bold("2013-2017")), x = .5, y = .5, rot = 90)
+popViewport()
+pushViewport(viewport(x = .25, y = .675, width = .3, height = .45))
+grid.rect(gp = gpar(col = "black"))
+par(new=TRUE)
+par(fig=gridFIG())
+wordcloud(names(broadcast.theme.before), broadcast.theme.before, 
+		  max.words = 50, colors=brewer.pal(8, "Dark2"))
+popViewport()
+pushViewport(viewport(x = .55, y = .675, width = .3, height = .45))
+grid.rect(gp = gpar(col = "black"))
+par(new=TRUE)
+par(fig=gridFIG())
+wordcloud(names(cable.theme.before), cable.theme.before,
+		  max.words = 50, colors=brewer.pal(8, "Dark2"))
+popViewport()
+pushViewport(viewport(x = .85, y = .675, width = .3, height = .45))
+grid.rect(gp = gpar(col = "black"))
+par(new=TRUE)
+par(fig=gridFIG())
+wordcloud(names(streaming.theme.before), streaming.theme.before,
+		  max.words = 50, colors=brewer.pal(8, "Dark2"))
+popViewport()
+pushViewport(viewport(x = .25, y = .225, width = .3, height = .45))
+grid.rect(gp = gpar(col = "black"))
+par(new=TRUE)
+par(fig=gridFIG())
+wordcloud(names(broadcast.theme.after), broadcast.theme.after,
+		  max.words = 50, colors=brewer.pal(8, "Dark2"))
+popViewport()
+pushViewport(viewport(x = .55, y = .225, width = .3, height = .45))
+grid.rect(gp = gpar(col = "black"))
+par(new=TRUE)
+par(fig=gridFIG())
+wordcloud(names(cable.theme.after), cable.theme.after,
+		  max.words = 50, colors=brewer.pal(8, "Dark2"))
+popViewport()
+pushViewport(viewport(x = .85, y = .225, width = .3, height = .45))
+grid.rect(gp = gpar(col = "black"))
+par(new=TRUE)
+par(fig=gridFIG())
+wordcloud(names(streaming.theme.after), streaming.theme.after,
+		  max.words = 50, colors=brewer.pal(8, "Dark2"))
+popViewport()
+
+par(opar)
+
+@
+
+    \caption{TV Networks (Themes)}
+    \label{fig:networkthemes}
+\end{figure}
+
+From Fig. \ref{fig:networkthemes}, as we move from left to right, we observe how the themes change from family-friendly themes in Broadcast Networks to themes like "sex, "death", "dark" and "evil" in Streaming Networks. There are many factors including the target age-group and censorship issues that are involved in such stark contrasts amongst the networks. Notice, even in the last decade, how the themes have evolved within each network. ]
+
+\subsection{Emmy Awards}
+
+We are looking into Emmy Awards since they are considered the Oscars of TV Shows.
+
+\begin{figure}[H]
+    \centering
+    
+<<awards3, message=FALSE, echo=FALSE, warning=FALSE>>=
+
+cols.fill1 <- rep("gray", 13)
+cols.fill1[c(1, 2, 6)] <- "red"
+cols.fill1[c(4, 8)] <- "green"
+
+p1 <- ggplot(emmy.networks.old) +
+	aes(x = Var1, y = Freq, fill = cols.fill1) +
+	geom_bar(stat = "identity", colour = "black") +
+	labs(title = "Emmy Awards won before 2007", x = "Network", y = "Awards won") +
+	theme_classic() +
+	theme(axis.text = element_text(angle = 45, hjust = 1)) +
+	scale_fill_manual(name = "Network", guide = "legend", values = c("gray" = "gray", "red" = "red", "green" = "green"), labels = c("Others", "Cable", "Broadcast"))
+
+cols.fill2 <- rep("gray", 15)
+cols.fill2[c(1, 2, 4)] <- "red"
+cols.fill2[c(3, 5, 8, 10)] <- "green"
+cols.fill2[c(6, 9)] <- "blue"
+
+p2 <- ggplot(emmy.networks.latest) +
+	aes(x = Var1, y = Freq, fill = cols.fill2) +
+	geom_bar(stat = "identity", colour = "black") +
+	labs(title = "Emmy Awards won since 2007", x = "Network", y = "Awards won") +
+	theme_classic() +
+	theme(axis.text = element_text(angle = 45, hjust = 1), legend.position = "bottom") +
+	scale_fill_manual(name = "Network", guide = "legend", values = c("gray" = "gray", "red" = "red", "green" = "green", "blue" = "blue"), labels = c("Streaming", "Others", "Cable", "Broadcast"))
+
+g_legend<-function(a.gplot){
+  tmp <- ggplot_gtable(ggplot_build(a.gplot))
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+  legend <- tmp$grobs[[leg]]
+  return(legend)}
+
+mylegend<-g_legend(p2)
+
+p3 <- grid.arrange(arrangeGrob(p1 + theme(legend.position="none"), 
+							   mylegend,
+                         p2 + theme(legend.position="none"),
+                         nrow=3, heights=c(5, 1, 5)))	
+
+@
+
+    \caption{TV Networks (Emmy Awards)}
+    \label{fig:awards}
+\end{figure}
+
+We can see from Fig. \ref{fig:awards} an obvious rise in the quality of cable networks especially in the past decades winning majority of the Emmys.
+
+\subsection{Genre}
+
+\begin{figure}[H]
+    \centering
+    
+<<tvgenre, message=FALSE, echo=FALSE, warning=FALSE>>=
+
+query <- paste("SELECT A.genre, COUNT(A.id) AS genre_count,",
+			   "AVG(A.siterating) AS rating,",
+			   "AVG(A.siteratingcount) AS ratingcount",
+			   "FROM (SELECT ",
+			   "id, ",
+			   "REGEXP_SPLIT_TO_TABLE(genre, ', ') AS genre,",
+			   "siterating, siteratingcount",
+			   "FROM Series",
+			   "WHERE firstAired BETWEEN '2007-01-01' AND '2017-12-31'",
+			   "AND network in (", paste0(broadcast.networks, collapse = ", ") ,")",") A",
+			   "GROUP By A.genre")
+
+broadcast.genre <- dbGetQuery(con, query) %>%
+	mutate(type = "Broadcast")
+
+query <- paste("SELECT A.genre, COUNT(A.id) AS genre_count,",
+			   "AVG(A.siterating) AS rating,",
+			   "AVG(A.siteratingcount) AS ratingcount",
+			   "FROM (SELECT ",
+			   "id, ",
+			   "REGEXP_SPLIT_TO_TABLE(genre, ', ') AS genre,",
+			   "siterating, siteratingcount",
+			   "FROM Series",
+			   "WHERE firstAired BETWEEN '2007-01-01' AND '2017-12-31'",
+			   "AND network in (", paste0(cable.networks, collapse = ", ") ,")",") A",
+			   "GROUP By A.genre")
+
+cable.genre <- dbGetQuery(con, query) %>%
+	mutate(type = "Cable")
+
+query <- paste("SELECT A.genre, COUNT(A.id) AS genre_count,",
+			   "AVG(A.siterating) AS rating,",
+			   "AVG(A.siteratingcount) AS ratingcount",
+			   "FROM (SELECT ",
+			   "id, ",
+			   "REGEXP_SPLIT_TO_TABLE(genre, ', ') AS genre,",
+			   "siterating, siteratingcount",
+			   "FROM Series",
+			   "WHERE firstAired BETWEEN '2007-01-01' AND '2017-12-31'",
+			   "AND network in (", paste0(streaming.networks, collapse = ", ") ,")",") A",
+			   "GROUP By A.genre")
+
+streaming.genre <- dbGetQuery(con, query) %>%
+	mutate(type = "Streaming")
+
+broadcast.genre1 <- broadcast.genre %>%
+	filter(genre_count > 10) %>%
+	arrange(desc(rating)) %>%
+	head(5)
+
+cable.genre1 <- cable.genre %>%
+	filter(genre_count > 10) %>%
+	arrange(desc(rating)) %>%
+	head(5)
+
+streaming.genre1 <- streaming.genre %>%
+	filter(genre_count > 10) %>%
+	arrange(desc(rating)) %>%
+	head(5)
+
+combined.genre0 <- bind_rows(broadcast.genre1, cable.genre1, streaming.genre1)
+combined.genre1 <- combined.genre0 %>%
+	mutate(col = ifelse(type == "Broadcast", "red", ifelse(type == "Cable", "green", "blue")),
+		   lty = ifelse(type == "Broadcast", 1, ifelse(type == "Cable", 2, 3)))
+
+combined.genre1$col <- as.factor(combined.genre1$col)
+
+ratemin <- min(combined.genre1$rating)
+raterange <- max(combined.genre1$rating) - ratemin
+ratecountmin <- min(combined.genre1$ratingcount)
+ratecountrange <- max(combined.genre1$ratingcount) - ratecountmin
+
+grid.newpage()
+pushViewport(plotViewport(c(5.1, 4.1, 4.1, 2.1)))
+pushViewport(dataViewport(xData = combined.genre1[, 3], yData = combined.genre1[, 4]))
+grid.rect()
+grid.xaxis()
+grid.yaxis()
+grid.grill(v = unit(seq(0, 1, .1), "npc"),
+		   h = unit(seq(0, 1, .1), "npc"))
+
+grid.circle(x = (broadcast.genre1[, 3] - ratemin)/raterange, 
+			y = (broadcast.genre1[, 4] - ratecountmin)/ratecountrange, 
+			r = broadcast.genre1[, 2] / 500,
+			gp = gpar(fill = "red", lty = 1, alpha = .25))
+grid.text(label = broadcast.genre1[c(1,3,5), 1] , 
+		  x = (broadcast.genre1[c(1,3,5), 3] - ratemin)/raterange, 
+		  y = (broadcast.genre1[c(1,3,5), 4] - ratecountmin)/ratecountrange,
+		  gp = gpar(lwd = 2, col = "darkred"),
+		  check.overlap = TRUE)
+grid.lines(x = c((broadcast.genre1[2, 3] - ratemin)/raterange,
+				 (broadcast.genre1[2, 3] - ratemin)/raterange + .06), 
+		   y = c((broadcast.genre1[2, 4] - ratecountmin)/ratecountrange,
+		   	  (broadcast.genre1[2, 4] - ratecountmin)/ratecountrange), 
+		   arrow = arrow(angle = 45, 
+		   			  length = unit(.05, "inches"),
+		   			  ends = "last", type = "open")
+)
+grid.text(label = broadcast.genre1[2, 1] , 
+		  x = (broadcast.genre1[2, 3] - ratemin)/raterange + .12, 
+		  y = (broadcast.genre1[2, 4] - ratecountmin)/ratecountrange,
+		  gp = gpar(lwd = 2, col = "darkred"),
+		  check.overlap = TRUE)
+grid.lines(x = c((broadcast.genre1[4, 3] - ratemin)/raterange,
+				 (broadcast.genre1[4, 3] - ratemin)/raterange - .06), 
+		   y = c((broadcast.genre1[4, 4] - ratecountmin)/ratecountrange,
+		   	  (broadcast.genre1[4, 4] - ratecountmin)/ratecountrange + .1), 
+		   arrow = arrow(angle = 45, 
+		   			  length = unit(.05, "inches"),
+		   			  ends = "last", type = "open")
+)
+grid.text(label = broadcast.genre1[4, 1] , 
+		  x = (broadcast.genre1[4, 3] - ratemin)/raterange - .08, 
+		  y = (broadcast.genre1[4, 4] - ratecountmin)/ratecountrange + .14,
+		  gp = gpar(lwd = 2, col = "darkred"),
+		  check.overlap = TRUE)
+
+grid.circle(x = (cable.genre1[, 3] - ratemin)/raterange, 
+			y = (cable.genre1[, 4] - ratecountmin)/ratecountrange, 
+			r = cable.genre1[, 2] / 500,
+			gp = gpar(fill = "green", lty = 2, alpha = .25))
+grid.text(label = cable.genre1[-4, 1] , 
+		  x = (cable.genre1[-4, 3] - ratemin)/raterange, 
+		  y = (cable.genre1[-4, 4] - ratecountmin)/ratecountrange,
+		  gp = gpar(lwd = 2, col = "darkgreen"),
+		  check.overlap = TRUE)
+grid.text(label = cable.genre1[4, 1] , 
+		  x = (cable.genre1[4, 3] - ratemin)/raterange + .08, 
+		  y = (cable.genre1[4, 4] - ratecountmin)/ratecountrange - .08,
+		  gp = gpar(lwd = 2, col = "darkgreen"),
+		  check.overlap = TRUE)
+
+grid.circle(x = (streaming.genre1[, 3] - ratemin)/raterange, 
+			y = (streaming.genre1[, 4] - ratecountmin)/ratecountrange, 
+			r = streaming.genre1[, 2] / 500,
+			gp = gpar(fill = "blue", lty = 3, alpha = .25))
+grid.text(label = streaming.genre1[1, 1] , 
+		  x = (streaming.genre1[1, 3] - ratemin)/raterange, 
+		  y = (streaming.genre1[1, 4] - ratecountmin)/ratecountrange,
+		  gp = gpar(lwd = 3, col = "darkblue"),
+		  check.overlap = TRUE)
+grid.text(label = streaming.genre1[5, 1] , 
+		  x = (streaming.genre1[5, 3] - ratemin)/raterange - .08, 
+		  y = (streaming.genre1[5, 4] - ratecountmin)/ratecountrange + .08,
+		  gp = gpar(lwd = 3, col = "darkblue"),
+		  check.overlap = TRUE)
+grid.lines(x = c((streaming.genre1[4, 3] - ratemin)/raterange,
+				 (streaming.genre1[4, 3] - ratemin)/raterange - .1), 
+		   y = c((streaming.genre1[4, 4] - ratecountmin)/ratecountrange,
+		   	  (streaming.genre1[4, 4] - ratecountmin)/ratecountrange - .06), 
+		   arrow = arrow(angle = 45, 
+		   			  length = unit(.05, "inches"),
+		   			  ends = "last", type = "open")
+)
+grid.text(label = streaming.genre1[4, 1] , 
+		  x = (streaming.genre1[4, 3] - ratemin)/raterange - .14, 
+		  y = (streaming.genre1[4, 4] - ratecountmin)/ratecountrange - .08,
+		  gp = gpar(lwd = 3, col = "darkblue"),
+		  check.overlap = TRUE)
+grid.lines(x = c((streaming.genre1[3, 3] - ratemin)/raterange,
+				 (streaming.genre1[3, 3] - ratemin)/raterange - .08), 
+		   y = c((streaming.genre1[3, 4] - ratecountmin)/ratecountrange,
+		   	  (streaming.genre1[3, 4] - ratecountmin)/ratecountrange + .22), 
+		   arrow = arrow(angle = 45, 
+		   			  length = unit(.05, "inches"),
+		   			  ends = "last", type = "open")
+)
+grid.text(label = streaming.genre1[3, 1] , 
+		  x = (streaming.genre1[3, 3] - ratemin)/raterange - .08, 
+		  y = (streaming.genre1[3, 4] - ratecountmin)/ratecountrange + .26,
+		  gp = gpar(lwd = 3, col = "darkblue"),
+		  check.overlap = TRUE)
+grid.lines(x = c((streaming.genre1[2, 3] - ratemin)/raterange,
+				 (streaming.genre1[2, 3] - ratemin)/raterange + .02), 
+		   y = c((streaming.genre1[2, 4] - ratecountmin)/ratecountrange,
+		   	  (streaming.genre1[2, 4] - ratecountmin)/ratecountrange + .12), 
+		   arrow = arrow(angle = 45, 
+		   			  length = unit(.05, "inches"),
+		   			  ends = "last", type = "open")
+)
+grid.text(label = streaming.genre1[2, 1] , 
+		  x = (streaming.genre1[2, 3] - ratemin)/raterange + .03, 
+		  y = (streaming.genre1[2, 4] - ratecountmin)/ratecountrange + .15,
+		  gp = gpar(lwd = 3, col = "darkblue"),
+		  check.overlap = TRUE)
+
+grid.text("Rating", y = -.11, x = .5,
+		  gp = gpar(fontsize = 14))
+grid.text("Rating Count", y = .5, x = -.08, rot = 90,
+		  gp = gpar(fontsize = 14))
+
+pushViewport(viewport(x = .15, y = .8, width = .3, height = .4))
+grid.rect()
+grid.legend(c("Broadcast", "Cable", "Streaming"), ncol = 1, 
+			gp = gpar(col = c("red", "green", "blue"), lty = c(1, 2, 3)))
+popViewport()
+
+
+@
+
+    \caption{TV Networks (Genres)}
+    \label{fig:genres}
+\end{figure}
+
+We have subsetted the data to have top 5 genres based on the rating with atleast 5 series produced for that genre. We have plotted the genres as circles across rating and rating count as in Fig. \ref{fig:genres}. The radii of the circles signify the genre count of the series. Broadcast Networks produce few shows in genres other than Drama and Comedy, but those shows are very highly rated. Crime and Drama shows produced by Cable Networks are the most well-regarded subset of TV series. There's not much difference in the rating across genres among Streaming Networks.
+
+\section{Remarks}
+
+Based on the dataset we possess, we thought it would be best to adopt visual story telling. Variables like \textit{airsTime} and \textit{rating} had sparse and inconsistent data and were not used. We are taking the variables like \textit{siteRating} and \textit{siteRatingCount} with a bit of skepticism since it's not as popular and reliable as IMDB, RottenTomatoes or Metacritic. For the popular shows at least, the ratings are quite similar to those sites.
+
+In many cases when we had to join the Emmy Data (which is in CSV format) and SQL data, there might be not have been complete merging due to differences in the names of TV Series or Actors.
+
+\section{Conclusion}
+
+Across the time, the most common themes were "life" and "war", which is quite poetic. Japanese voice-actors dominate in terms of diversity, prolificacy and quality of the shows they are part of. The production for Broadcast Networks can be considered constant, Cable Networks can be considered linear and Streaming Networks exponential. Genres such as Crime, Mystery and Fantasy have been more well-received compared to other genres. Broadcast Networks serve all age-groups and hence often portray family-friendly themes however shows on Streaming networks having fewer restrictions can delve into wider variety of themes.
+
+\printbibliography
+
+\end{document}
